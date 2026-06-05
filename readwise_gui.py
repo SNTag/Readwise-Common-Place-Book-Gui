@@ -167,7 +167,6 @@ class App(tk.Tk):
 
         ttk.Button(tf, text="Save", command=self._save_token).grid(row=0, column=1)
         ttk.Button(tf, text="Show", command=lambda: self._toggle_show(token_entry)).grid(row=0, column=2, padx=(4, 0))
-        ttk.Button(tf, text="⚙ Settings", command=self._open_settings).grid(row=0, column=3, padx=(4, 0))
 
         link = tk.Label(tf, text="Get token →", fg="blue", cursor="hand2",
                         font=("TkDefaultFont", 9, "underline"))
@@ -223,10 +222,11 @@ class App(tk.Tk):
         ttk.Label(bf, textvariable=self.status_var, foreground="grey").grid(
             row=0, column=0, sticky="w")
 
+        ttk.Button(bf, text="⚙ Settings", command=self._open_settings).grid(row=0, column=1, padx=(0, 6))
         self.submit_btn = ttk.Button(bf, text="Submit →", command=self._submit)
-        self.submit_btn.grid(row=0, column=1)
+        self.submit_btn.grid(row=0, column=2)
         ttk.Button(bf, text="Clear", command=self._clear).grid(
-            row=0, column=2, padx=(6, 0))
+            row=0, column=3, padx=(6, 0))
 
         self.bind("<Return>",    lambda e: None)           # don't submit on Enter in text box
         self.bind("<Control-Return>", lambda e: self._submit())
