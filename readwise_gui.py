@@ -11,8 +11,15 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import requests
 
-API_URL    = "https://readwise.io/api/v2/highlights/"
-TOKEN_FILE = os.path.join(os.path.expanduser("~"), ".config", "readwise", "token")
+API_URL       = "https://readwise.io/api/v2/highlights/"
+TOKEN_FILE    = os.path.join(os.path.expanduser("~"), ".config", "readwise", "token")
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".config", "readwise", "settings.json")
+
+DEFAULT_SETTINGS = {
+    "default_title":  "",
+    "default_author": "",
+    "default_tags":   "",
+}
 
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
@@ -36,6 +43,24 @@ def save_token(token):
         pass  # Windows doesn't support chmod
 
 
+# ── Settings helpers ──────────────────────────────────────────────────────────
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE) as f:
+                data = json.load(f)
+            return {**DEFAULT_SETTINGS, **data}
+        except Exception:
+            pass
+    return dict(DEFAULT_SETTINGS)
+
+def save_settings(settings):
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
+
+
 # ── API ───────────────────────────────────────────────────────────────────────
 
 def post_highlight(token, text, title=None, author=None, note=None, tags=None):
@@ -55,6 +80,61 @@ def post_highlight(token, text, title=None, author=None, note=None, tags=None):
     return resp.json()
 
 
+# ── Settings dialog ───────────────────────────────────────────────────────────
+
+class SettingsDialog(tk.Toplevel):
+    def __init__(self, parent, settings, on_save):
+        super().__init__(parent)
+        self.title("Settings")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self._on_save = on_save
+
+        p = 10
+        frame = ttk.Frame(self, padding=p)
+        frame.grid(sticky="nsew")
+        frame.columnconfigure(1, weight=1)
+
+        ttk.Label(frame, text="Defaults are used when a field is left blank.",
+                  foreground="grey").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, p))
+
+        fields = [
+            ("Default title",  "default_title"),
+            ("Default author", "default_author"),
+            ("Default tags",   "default_tags"),
+        ]
+        self._vars = {}
+        for i, (label, key) in enumerate(fields, start=1):
+            ttk.Label(frame, text=label).grid(row=i, column=0, sticky="w", pady=3, padx=(0, p))
+            var = tk.StringVar(value=settings.get(key, ""))
+            ttk.Entry(frame, textvariable=var, width=36).grid(row=i, column=1, sticky="ew", pady=3)
+            self._vars[key] = var
+
+        ttk.Label(frame, text="Tags: space-separated  e.g. stoicism writing",
+                  foreground="grey").grid(row=4, column=1, sticky="w")
+
+        bf = ttk.Frame(frame)
+        bf.grid(row=5, column=0, columnspan=2, sticky="e", pady=(p, 0))
+        ttk.Button(bf, text="Save", command=self._save).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(bf, text="Cancel", command=self.destroy).grid(row=0, column=1)
+
+        self.bind("<Return>", lambda _: self._save())
+        self.bind("<Escape>", lambda _: self.destroy())
+
+        # Center over parent
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+
+    def _save(self):
+        settings = {key: var.get().strip() for key, var in self._vars.items()}
+        save_settings(settings)
+        self._on_save(settings)
+        self.destroy()
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -65,8 +145,10 @@ class App(tk.Tk):
         self.title("Readwise — Add Quote")
         self.resizable(True, True)
         self.minsize(480, 520)
+        self._settings = load_settings()
         self._build()
         self._load_token()
+        self._apply_defaults()
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -140,10 +222,11 @@ class App(tk.Tk):
         ttk.Label(bf, textvariable=self.status_var, foreground="grey").grid(
             row=0, column=0, sticky="w")
 
+        ttk.Button(bf, text="⚙ Settings", command=self._open_settings).grid(row=0, column=1, padx=(0, 6))
         self.submit_btn = ttk.Button(bf, text="Submit →", command=self._submit)
-        self.submit_btn.grid(row=0, column=1)
+        self.submit_btn.grid(row=0, column=2)
         ttk.Button(bf, text="Clear", command=self._clear).grid(
-            row=0, column=2, padx=(6, 0))
+            row=0, column=3, padx=(6, 0))
 
         self.bind("<Return>",    lambda e: None)           # don't submit on Enter in text box
         self.bind("<Control-Return>", lambda e: self._submit())
@@ -170,13 +253,23 @@ class App(tk.Tk):
         import webbrowser
         webbrowser.open(url)
 
+    def _apply_defaults(self):
+        self.title_var.set(self._settings.get("default_title", ""))
+        self.author_var.set(self._settings.get("default_author", ""))
+        self.tags_var.set(self._settings.get("default_tags", ""))
+
+    def _open_settings(self):
+        def on_save(new_settings):
+            self._settings = new_settings
+            self.status_var.set("Settings saved.")
+
+        SettingsDialog(self, self._settings, on_save)
+
     def _clear(self):
         self.quote_text.delete("1.0", "end")
         self.note_text.delete("1.0", "end")
-        self.title_var.set("")
-        self.author_var.set("")
-        self.tags_var.set("")
         self.status_var.set("")
+        self._apply_defaults()
         self.quote_text.focus()
 
     # ── Submit ────────────────────────────────────────────────────────────────
