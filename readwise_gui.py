@@ -80,6 +80,55 @@ def post_highlight(token, text, title=None, author=None, note=None, tags=None):
     return resp.json()
 
 
+# ── Placeholder entry ─────────────────────────────────────────────────────────
+
+class PlaceholderEntry(ttk.Entry):
+    """Entry that shows placeholder text in grey when the field is empty."""
+
+    PLACEHOLDER_COLOR = "grey"
+
+    def __init__(self, master, placeholder="", **kw):
+        super().__init__(master, **kw)
+        self._placeholder = placeholder
+        self._is_placeholder = False
+        self._normal_fg = self.cget("foreground") or "black"
+        self.bind("<FocusIn>",  self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
+        self._show_placeholder()
+
+    def set_placeholder(self, text):
+        was_placeholder = self._is_placeholder
+        self._placeholder = text
+        if was_placeholder or not self.get():
+            self._show_placeholder()
+
+    def _show_placeholder(self):
+        if self._placeholder:
+            self.delete(0, "end")
+            self.insert(0, self._placeholder)
+            self.configure(foreground=self.PLACEHOLDER_COLOR)
+            self._is_placeholder = True
+        else:
+            self._is_placeholder = False
+
+    def _on_focus_in(self, _event):
+        if self._is_placeholder:
+            self.delete(0, "end")
+            self.configure(foreground=self._normal_fg)
+            self._is_placeholder = False
+
+    def _on_focus_out(self, _event):
+        if not self.get().strip():
+            self._show_placeholder()
+
+    def real_value(self):
+        """Return the user-typed value, or empty string if showing placeholder."""
+        return "" if self._is_placeholder else self.get().strip()
+
+    def clear(self):
+        self._show_placeholder()
+
+
 # ── Settings dialog ───────────────────────────────────────────────────────────
 
 class SettingsDialog(tk.Toplevel):
@@ -193,12 +242,12 @@ class App(tk.Tk):
 
         for i, lbl in enumerate(("Title", "Author", "Tags")):
             ttk.Label(mf, text=lbl).grid(row=i, column=0, sticky="w", pady=2)
-        self.title_var  = tk.StringVar()
-        self.author_var = tk.StringVar()
-        self.tags_var   = tk.StringVar()
-        ttk.Entry(mf, textvariable=self.title_var).grid( row=0, column=1, sticky="ew", padx=(p,0))
-        ttk.Entry(mf, textvariable=self.author_var).grid(row=1, column=1, sticky="ew", padx=(p,0))
-        ttk.Entry(mf, textvariable=self.tags_var).grid(  row=2, column=1, sticky="ew", padx=(p,0))
+        self.title_entry  = PlaceholderEntry(mf)
+        self.author_entry = PlaceholderEntry(mf)
+        self.tags_entry   = PlaceholderEntry(mf)
+        self.title_entry.grid( row=0, column=1, sticky="ew", padx=(p,0))
+        self.author_entry.grid(row=1, column=1, sticky="ew", padx=(p,0))
+        self.tags_entry.grid(  row=2, column=1, sticky="ew", padx=(p,0))
         ttk.Label(mf, text="space-separated  e.g. stoicism writing",
                   foreground="grey").grid(row=3, column=1, sticky="w", padx=(p,0))
 
@@ -254,9 +303,9 @@ class App(tk.Tk):
         webbrowser.open(url)
 
     def _apply_defaults(self):
-        self.title_var.set(self._settings.get("default_title", ""))
-        self.author_var.set(self._settings.get("default_author", ""))
-        self.tags_var.set(self._settings.get("default_tags", ""))
+        self.title_entry.set_placeholder(self._settings.get("default_title", ""))
+        self.author_entry.set_placeholder(self._settings.get("default_author", ""))
+        self.tags_entry.set_placeholder(self._settings.get("default_tags", ""))
 
     def _open_settings(self):
         def on_save(new_settings):
@@ -269,7 +318,9 @@ class App(tk.Tk):
         self.quote_text.delete("1.0", "end")
         self.note_text.delete("1.0", "end")
         self.status_var.set("")
-        self._apply_defaults()
+        self.title_entry.clear()
+        self.author_entry.clear()
+        self.tags_entry.clear()
         self.quote_text.focus()
 
     # ── Submit ────────────────────────────────────────────────────────────────
@@ -285,10 +336,10 @@ class App(tk.Tk):
             messagebox.showwarning("Empty quote", "The quote field cannot be empty.")
             return
 
-        title  = self.title_var.get().strip()  or None
-        author = self.author_var.get().strip()  or None
+        title  = self.title_entry.real_value()  or self._settings.get("default_title")  or None
+        author = self.author_entry.real_value() or self._settings.get("default_author") or None
         note   = self.note_text.get("1.0", "end").strip() or None
-        tags   = self.tags_var.get().split()   or None
+        tags   = (self.tags_entry.real_value() or self._settings.get("default_tags", "")).split() or None
 
         self.status_var.set("Sending…")
         self.submit_btn.state(["disabled"])
