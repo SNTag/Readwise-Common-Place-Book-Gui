@@ -1,30 +1,42 @@
 #!/usr/bin/env python3
 """
-Readwise quote capture — cross-platform GUI (tkinter).
+Readwise Obsidian sync — parses quote notes from a folder and sends them
+to Readwise. Files already tagged 'readwise' are skipped. After a
+successful upload the tag is added to the file so it won't be re-sent.
+
 Requires: pip install requests
 """
 
-import os
-import sys
-import json
-import tkinter as tk
-from tkinter import ttk, messagebox
-import requests
-
 LAST_MODIFIED = "2026-08-17"
 
-API_URL       = "https://readwise.io/api/v2/highlights/"
-TOKEN_FILE    = os.path.join(os.path.expanduser("~"), ".config", "readwise", "token")
-SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".config", "readwise", "settings.json")
+# ── User configuration ────────────────────────────────────────────────────────
+# Adjust these two paths before running.
 
-DEFAULT_SETTINGS = {
-    "default_title":  "",
-    "default_author": "",
-    "default_tags":   "",
-}
+OBSIDIAN_FOLDER = r"C:\Users\YourName\Documents\Obsidian\Vault\Quotes"
+TOKEN_FILE      = r"C:\Users\YourName\.config\readwise\token"
+
+# On Linux / macOS you can use forward slashes and ~ expansion, e.g.:
+#   OBSIDIAN_FOLDER = os.path.expanduser("~/Documents/Obsidian/Quotes")
+#   TOKEN_FILE      = os.path.expanduser("~/.config/readwise/token")
+
+# Tag written into a file after it has been successfully sent to Readwise.
+SENT_TAG = "readwise"
+
+# Default title used when a note has no title field (or it is blank).
+DEFAULT_TITLE = "CommonPlace Book"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os
+import re
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+import requests
+
+API_URL = "https://readwise.io/api/v2/highlights/"
 
 
-# ── Token helpers ─────────────────────────────────────────────────────────────
+# ── Token ─────────────────────────────────────────────────────────────────────
 
 def load_token():
     t = os.environ.get("READWISE_TOKEN")
@@ -42,25 +54,60 @@ def save_token(token):
     try:
         os.chmod(TOKEN_FILE, 0o600)
     except Exception:
-        pass  # Windows doesn't support chmod
+        pass  # not supported on Windows
 
 
-# ── Settings helpers ──────────────────────────────────────────────────────────
+# ── YAML frontmatter helpers ──────────────────────────────────────────────────
 
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE) as f:
-                data = json.load(f)
-            return {**DEFAULT_SETTINGS, **data}
-        except Exception:
-            pass
-    return dict(DEFAULT_SETTINGS)
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+_TAG_LINE_RE    = re.compile(r"^tags\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
 
-def save_settings(settings):
-    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=2)
+
+def parse_frontmatter(text):
+    """Return a dict of key/value pairs from YAML frontmatter, or {}."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}
+    result = {}
+    for line in m.group(1).splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            result[key.strip().lower()] = val.strip()
+    return result
+
+
+def get_tags(text):
+    """Return the tags list from frontmatter as lowercase strings."""
+    fm = parse_frontmatter(text)
+    raw = fm.get("tags", "")
+    if not raw:
+        return []
+    # Support both inline (tags: foo bar) and quoted forms
+    return [t.strip().strip('"').lower() for t in raw.split() if t.strip()]
+
+
+def add_sent_tag(filepath, text):
+    """Append SENT_TAG to the tags line in frontmatter and rewrite the file."""
+    def replacer(m):
+        existing = m.group(1).strip()
+        if existing:
+            return f"tags: {existing} {SENT_TAG}"
+        return f"tags: {SENT_TAG}"
+
+    fm_match = _FRONTMATTER_RE.match(text)
+    if not fm_match:
+        return  # no frontmatter to update
+
+    if _TAG_LINE_RE.search(fm_match.group(1)):
+        # tags line exists — append to it
+        new_fm = _TAG_LINE_RE.sub(replacer, fm_match.group(1))
+    else:
+        # no tags line — add one
+        new_fm = fm_match.group(1) + f"\ntags: {SENT_TAG}"
+
+    new_text = text[:fm_match.start(1)] + new_fm + text[fm_match.end(1):]
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(new_text)
 
 
 # ── API ───────────────────────────────────────────────────────────────────────
@@ -82,126 +129,59 @@ def post_highlight(token, text, title=None, author=None, note=None, tags=None):
     return resp.json()
 
 
-# ── Placeholder entry ─────────────────────────────────────────────────────────
+# ── File scanning ─────────────────────────────────────────────────────────────
 
-class PlaceholderEntry(ttk.Entry):
-    """Entry that shows placeholder text in grey when the field is empty."""
+def scan_folder(folder):
+    """
+    Return a list of dicts for every .md file that:
+      - has a non-empty 'quote' field in its frontmatter
+      - does NOT already have the SENT_TAG tag
+    Each dict: {path, title, author, quote}
+    """
+    pending = []
+    if not os.path.isdir(folder):
+        return pending
+    for fname in sorted(os.listdir(folder)):
+        if not fname.endswith(".md"):
+            continue
+        fpath = os.path.join(folder, fname)
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            continue
 
-    PLACEHOLDER_COLOR = "grey"
+        if SENT_TAG in get_tags(text):
+            continue
 
-    def __init__(self, master, placeholder="", **kw):
-        super().__init__(master, **kw)
-        self._placeholder = placeholder
-        self._is_placeholder = False
-        self._normal_fg = self.cget("foreground") or "black"
-        self.bind("<FocusIn>",  self._on_focus_in)
-        self.bind("<FocusOut>", self._on_focus_out)
-        self._show_placeholder()
+        fm = parse_frontmatter(text)
+        quote = fm.get("quote", "").strip()
+        if not quote:
+            continue
 
-    def set_placeholder(self, text):
-        was_placeholder = self._is_placeholder
-        self._placeholder = text
-        if was_placeholder or not self.get():
-            self._show_placeholder()
-
-    def _show_placeholder(self):
-        if self._placeholder:
-            self.delete(0, "end")
-            self.insert(0, self._placeholder)
-            self.configure(foreground=self.PLACEHOLDER_COLOR)
-            self._is_placeholder = True
-        else:
-            self._is_placeholder = False
-
-    def _on_focus_in(self, _event):
-        if self._is_placeholder:
-            self.delete(0, "end")
-            self.configure(foreground=self._normal_fg)
-            self._is_placeholder = False
-
-    def _on_focus_out(self, _event):
-        if not self.get().strip():
-            self._show_placeholder()
-
-    def real_value(self):
-        """Return the user-typed value, or empty string if showing placeholder."""
-        return "" if self._is_placeholder else self.get().strip()
-
-    def clear(self):
-        self._show_placeholder()
+        pending.append({
+            "path":   fpath,
+            "title":  fm.get("title", "").strip() or DEFAULT_TITLE,
+            "author": fm.get("author", "").strip() or None,
+            "quote":  quote,
+        })
+    return pending
 
 
-# ── Settings dialog ───────────────────────────────────────────────────────────
-
-class SettingsDialog(tk.Toplevel):
-    def __init__(self, parent, settings, on_save):
-        super().__init__(parent)
-        self.title("Settings")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        self._on_save = on_save
-
-        p = 10
-        frame = ttk.Frame(self, padding=p)
-        frame.grid(sticky="nsew")
-        frame.columnconfigure(1, weight=1)
-
-        ttk.Label(frame, text="Defaults are used when a field is left blank.",
-                  foreground="grey").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, p))
-
-        fields = [
-            ("Default title",  "default_title"),
-            ("Default author", "default_author"),
-            ("Default tags",   "default_tags"),
-        ]
-        self._vars = {}
-        for i, (label, key) in enumerate(fields, start=1):
-            ttk.Label(frame, text=label).grid(row=i, column=0, sticky="w", pady=3, padx=(0, p))
-            var = tk.StringVar(value=settings.get(key, ""))
-            ttk.Entry(frame, textvariable=var, width=36).grid(row=i, column=1, sticky="ew", pady=3)
-            self._vars[key] = var
-
-        ttk.Label(frame, text="Tags: space-separated  e.g. stoicism writing",
-                  foreground="grey").grid(row=4, column=1, sticky="w")
-
-        bf = ttk.Frame(frame)
-        bf.grid(row=5, column=0, columnspan=2, sticky="e", pady=(p, 0))
-        ttk.Button(bf, text="Save", command=self._save).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(bf, text="Cancel", command=self.destroy).grid(row=0, column=1)
-
-        self.bind("<Return>", lambda _: self._save())
-        self.bind("<Escape>", lambda _: self.destroy())
-
-        # Center over parent
-        self.update_idletasks()
-        x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"+{x}+{y}")
-
-    def _save(self):
-        settings = {key: var.get().strip() for key, var in self._vars.items()}
-        save_settings(settings)
-        self._on_save(settings)
-        self.destroy()
-
-
-# ── Main window ───────────────────────────────────────────────────────────────
+# ── GUI ───────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
     PAD = 10
 
     def __init__(self):
         super().__init__()
-        self.title("Readwise — Add Quote")
+        self.title("Readwise — Obsidian Sync")
         self.resizable(True, True)
-        self.minsize(480, 520)
-        self._settings = load_settings()
+        self.minsize(560, 520)
+        self._pending = []
         self._build()
         self._load_token()
-        self._apply_defaults()
-
-    # ── Layout ────────────────────────────────────────────────────────────────
+        self._scan()
 
     def _build(self):
         p = self.PAD
@@ -215,72 +195,59 @@ class App(tk.Tk):
         self.token_var = tk.StringVar()
         token_entry = ttk.Entry(tf, textvariable=self.token_var, show="•", width=50)
         token_entry.grid(row=0, column=0, sticky="ew", padx=(0, p))
-
-        ttk.Button(tf, text="Save", command=self._save_token).grid(row=0, column=1)
-        ttk.Button(tf, text="Show", command=lambda: self._toggle_show(token_entry)).grid(row=0, column=2, padx=(4, 0))
+        ttk.Button(tf, text="Save",  command=self._save_token).grid(row=0, column=1)
+        ttk.Button(tf, text="Show",  command=lambda: self._toggle_show(token_entry)).grid(row=0, column=2, padx=(4, 0))
 
         link = tk.Label(tf, text="Get token →", fg="blue", cursor="hand2",
                         font=("TkDefaultFont", 9, "underline"))
         link.grid(row=1, column=0, sticky="w", pady=(4, 0))
         link.bind("<Button-1>", lambda _: self._open_url("https://readwise.io/access_token"))
 
-        # Quote
-        qf = ttk.LabelFrame(self, text="Quote *", padding=p)
-        qf.grid(row=1, column=0, sticky="nsew", padx=p, pady=(p, 0))
-        qf.columnconfigure(0, weight=1)
-        qf.rowconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        # Folder row
+        ff = ttk.LabelFrame(self, text="Obsidian folder", padding=p)
+        ff.grid(row=1, column=0, sticky="ew", padx=p, pady=(p, 0))
+        ff.columnconfigure(0, weight=1)
 
-        self.quote_text = tk.Text(qf, height=8, wrap="word", undo=True)
-        self.quote_text.grid(row=0, column=0, sticky="nsew")
-        qs = ttk.Scrollbar(qf, command=self.quote_text.yview)
-        qs.grid(row=0, column=1, sticky="ns")
-        self.quote_text.configure(yscrollcommand=qs.set)
+        self.folder_var = tk.StringVar(value=OBSIDIAN_FOLDER)
+        ttk.Entry(ff, textvariable=self.folder_var).grid(row=0, column=0, sticky="ew", padx=(0, p))
+        ttk.Button(ff, text="Scan", command=self._scan).grid(row=0, column=1)
 
-        # Metadata
-        mf = ttk.LabelFrame(self, text="Source (optional)", padding=p)
-        mf.grid(row=2, column=0, sticky="ew", padx=p, pady=(p, 0))
-        mf.columnconfigure(1, weight=1)
+        # Pending files list
+        lf = ttk.LabelFrame(self, text="Pending notes", padding=p)
+        lf.grid(row=2, column=0, sticky="nsew", padx=p, pady=(p, 0))
+        lf.columnconfigure(0, weight=1)
+        lf.rowconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
 
-        for i, lbl in enumerate(("Title", "Author", "Tags")):
-            ttk.Label(mf, text=lbl).grid(row=i, column=0, sticky="w", pady=2)
-        self.title_entry  = PlaceholderEntry(mf)
-        self.author_entry = PlaceholderEntry(mf)
-        self.tags_entry   = PlaceholderEntry(mf)
-        self.title_entry.grid( row=0, column=1, sticky="ew", padx=(p,0))
-        self.author_entry.grid(row=1, column=1, sticky="ew", padx=(p,0))
-        self.tags_entry.grid(  row=2, column=1, sticky="ew", padx=(p,0))
-        ttk.Label(mf, text="space-separated  e.g. stoicism writing",
-                  foreground="grey").grid(row=3, column=1, sticky="w", padx=(p,0))
+        cols = ("title", "author", "quote")
+        self.tree = ttk.Treeview(lf, columns=cols, show="headings", selectmode="extended")
+        for col, width in zip(cols, (160, 120, 260)):
+            self.tree.heading(col, text=col.capitalize())
+            self.tree.column(col,  width=width, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(lf, command=self.tree.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=sb.set)
 
-        # Note
-        nf = ttk.LabelFrame(self, text="Your note (optional)", padding=p)
-        nf.grid(row=3, column=0, sticky="ew", padx=p, pady=(p, 0))
-        nf.columnconfigure(0, weight=1)
+        # Log
+        logf = ttk.LabelFrame(self, text="Log", padding=p)
+        logf.grid(row=3, column=0, sticky="ew", padx=p, pady=(p, 0))
+        logf.columnconfigure(0, weight=1)
 
-        self.note_text = tk.Text(nf, height=3, wrap="word", undo=True)
-        self.note_text.grid(row=0, column=0, sticky="ew")
-        ns = ttk.Scrollbar(nf, command=self.note_text.yview)
-        ns.grid(row=0, column=1, sticky="ns")
-        self.note_text.configure(yscrollcommand=ns.set)
+        self.log = scrolledtext.ScrolledText(logf, height=5, state="disabled", wrap="word")
+        self.log.grid(row=0, column=0, sticky="ew")
 
-        # Status + submit
-        bf = ttk.Frame(self, padding=(p, p//2, p, p))
+        # Buttons
+        bf = ttk.Frame(self, padding=(p, p // 2, p, p))
         bf.grid(row=4, column=0, sticky="ew")
         bf.columnconfigure(0, weight=1)
 
         self.status_var = tk.StringVar()
-        ttk.Label(bf, textvariable=self.status_var, foreground="grey").grid(
-            row=0, column=0, sticky="w")
+        ttk.Label(bf, textvariable=self.status_var, foreground="grey").grid(row=0, column=0, sticky="w")
 
-        ttk.Button(bf, text="⚙ Settings", command=self._open_settings).grid(row=0, column=1, padx=(0, 6))
-        self.submit_btn = ttk.Button(bf, text="Submit →", command=self._submit)
-        self.submit_btn.grid(row=0, column=2)
-        ttk.Button(bf, text="Clear", command=self._clear).grid(
-            row=0, column=3, padx=(6, 0))
-
-        self.bind("<Return>",    lambda e: None)           # don't submit on Enter in text box
-        self.bind("<Control-Return>", lambda e: self._submit())
+        self.send_btn = ttk.Button(bf, text="Send all →", command=self._send_all)
+        self.send_btn.grid(row=0, column=1)
+        ttk.Button(bf, text="Send selected", command=self._send_selected).grid(row=0, column=2, padx=(6, 0))
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -295,7 +262,7 @@ class App(tk.Tk):
             messagebox.showwarning("No token", "Paste your token first.")
             return
         save_token(t)
-        self.status_var.set("Token saved.")
+        self._log("Token saved.")
 
     def _toggle_show(self, entry):
         entry.configure(show="" if entry.cget("show") == "•" else "•")
@@ -304,65 +271,72 @@ class App(tk.Tk):
         import webbrowser
         webbrowser.open(url)
 
-    def _apply_defaults(self):
-        self.title_entry.set_placeholder(self._settings.get("default_title", ""))
-        self.author_entry.set_placeholder(self._settings.get("default_author", ""))
-        self.tags_entry.set_placeholder(self._settings.get("default_tags", ""))
+    def _log(self, msg):
+        self.log.configure(state="normal")
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
 
-    def _open_settings(self):
-        def on_save(new_settings):
-            self._settings = new_settings
-            self.status_var.set("Settings saved.")
+    def _scan(self):
+        folder = self.folder_var.get().strip()
+        self._pending = scan_folder(folder)
+        self.tree.delete(*self.tree.get_children())
+        for item in self._pending:
+            self.tree.insert("", "end", values=(
+                item["title"],
+                item["author"] or "",
+                item["quote"][:80] + ("…" if len(item["quote"]) > 80 else ""),
+            ))
+        self.status_var.set(f"{len(self._pending)} note(s) pending.")
+        self._log(f"Scanned '{folder}': {len(self._pending)} pending.")
 
-        SettingsDialog(self, self._settings, on_save)
+    # ── Send ──────────────────────────────────────────────────────────────────
 
-    def _clear(self):
-        self.quote_text.delete("1.0", "end")
-        self.note_text.delete("1.0", "end")
-        self.status_var.set("")
-        self.title_entry.clear()
-        self.author_entry.clear()
-        self.tags_entry.clear()
-        self.quote_text.focus()
-
-    # ── Submit ────────────────────────────────────────────────────────────────
-
-    def _submit(self):
-        token = self.token_var.get().strip()
-        if not token:
+    def _get_token(self):
+        t = self.token_var.get().strip()
+        if not t:
             messagebox.showwarning("No token", "Enter your Readwise API token first.")
+        return t
+
+    def _send_items(self, items):
+        token = self._get_token()
+        if not token:
             return
+        sent = 0
+        for item in items:
+            try:
+                result = post_highlight(token, item["quote"], item["title"], item["author"])
+                hl_id  = result[0].get("id", "?") if result else "?"
+                with open(item["path"], encoding="utf-8") as f:
+                    text = f.read()
+                add_sent_tag(item["path"], text)
+                self._log(f"✓ Sent '{item['title']}' (id {hl_id})")
+                sent += 1
+            except requests.HTTPError as e:
+                self._log(f"✗ API error for '{item['title']}': {e.response.status_code}")
+            except requests.ConnectionError:
+                self._log(f"✗ Connection error — '{item['title']}' not sent.")
+        self.status_var.set(f"Done: {sent}/{len(items)} sent.")
+        self._scan()
 
-        text = self.quote_text.get("1.0", "end").strip()
-        if not text:
-            messagebox.showwarning("Empty quote", "The quote field cannot be empty.")
+    def _send_all(self):
+        if not self._pending:
+            messagebox.showinfo("Nothing to send", "No pending notes found.")
             return
-
-        title  = self.title_entry.real_value()  or self._settings.get("default_title")  or "CommonPlace Book"
-        author = self.author_entry.real_value() or self._settings.get("default_author") or None
-        note   = self.note_text.get("1.0", "end").strip() or None
-        tags   = (self.tags_entry.real_value() or self._settings.get("default_tags", "")).split() or None
-
-        self.status_var.set("Sending…")
-        self.submit_btn.state(["disabled"])
+        self.send_btn.state(["disabled"])
         self.update()
-
         try:
-            result = post_highlight(token, text, title, author, note, tags)
-            hl_id  = result[0].get("id", "?") if result else "?"
-            dest   = title or "Quotes"
-            self.status_var.set(f"✓ Saved to '{dest}'  (id {hl_id})")
-            self._clear()
-        except requests.HTTPError as e:
-            messagebox.showerror("API error",
-                f"Status {e.response.status_code}:\n{e.response.text}")
-            self.status_var.set("Error — not saved.")
-        except requests.ConnectionError:
-            messagebox.showerror("Connection error",
-                "Could not reach Readwise.\nCheck your internet connection.")
-            self.status_var.set("Error — not saved.")
+            self._send_items(self._pending)
         finally:
-            self.submit_btn.state(["!disabled"])
+            self.send_btn.state(["!disabled"])
+
+    def _send_selected(self):
+        selected_indices = [self.tree.index(iid) for iid in self.tree.selection()]
+        items = [self._pending[i] for i in selected_indices]
+        if not items:
+            messagebox.showinfo("Nothing selected", "Select one or more notes first.")
+            return
+        self._send_items(items)
 
 
 if __name__ == "__main__":
