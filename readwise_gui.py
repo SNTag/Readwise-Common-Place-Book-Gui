@@ -336,7 +336,7 @@ class App(tk.Tk):
             messagebox.showwarning("Empty quote", "The quote field cannot be empty.")
             return
 
-        title  = self.title_entry.real_value()  or self._settings.get("default_title")  or None
+        title  = self.title_entry.real_value()  or self._settings.get("default_title")  or "CommonPlace Book"
         author = self.author_entry.real_value() or self._settings.get("default_author") or None
         note   = self.note_text.get("1.0", "end").strip() or None
         tags   = (self.tags_entry.real_value() or self._settings.get("default_tags", "")).split() or None
