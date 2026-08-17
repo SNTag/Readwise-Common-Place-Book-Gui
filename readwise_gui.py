@@ -11,6 +11,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import requests
 
+LAST_MODIFIED = "2026-08-17"
+
 API_URL       = "https://readwise.io/api/v2/highlights/"
 TOKEN_FILE    = os.path.join(os.path.expanduser("~"), ".config", "readwise", "token")
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".config", "readwise", "settings.json")
