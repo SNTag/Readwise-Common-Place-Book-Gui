@@ -92,10 +92,30 @@ def parse_frontmatter(text):
     if not m:
         return {}
     result = {}
-    for line in m.group(1).splitlines():
-        if ":" in line:
+    lines = m.group(1).splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if ":" in line and not line.startswith(" "):
             key, _, val = line.partition(":")
-            result[key.strip().lower()] = val.strip()
+            key = key.strip().lower()
+            val = val.strip()
+            if val in ("|", "|-", "|+", ">", ">-", ">+"):
+                # Block scalar — collect indented lines that follow
+                block_lines = []
+                i += 1
+                while i < len(lines) and (lines[i].startswith(" ") or lines[i] == ""):
+                    block_lines.append(lines[i])
+                    i += 1
+                # Dedent by the common leading spaces
+                dedented = []
+                for bl in block_lines:
+                    dedented.append(bl.lstrip(" ") if bl.strip() else "")
+                result[key] = "\n".join(dedented).strip()
+                continue
+            else:
+                result[key] = val
+        i += 1
     return result
 
 
