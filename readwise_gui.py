@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Readwise Obsidian sync — parses quote notes from a folder and sends them
-to Readwise. Files already tagged 'readwise' are skipped. After a
-successful upload the tag is added to the file so it won't be re-sent.
+Readwise Obsidian sync — scans a folder, shows all notes, sends pending
+quotes to Readwise. Files tagged 'readwise' are shown in blue and skipped.
+After a successful upload the tag and Readwise ID are written back to the file.
 
 Requires: pip install requests keyring
 """
@@ -10,26 +10,18 @@ Requires: pip install requests keyring
 LAST_MODIFIED = "2026-08-29"
 
 # ── User configuration ────────────────────────────────────────────────────────
-# Adjust OBSIDIAN_FOLDER before running. The token is stored securely via
-# your OS keychain (Windows Credential Manager / macOS Keychain / Linux
-# Secret Service) — no need to put it in a file.
-
 OBSIDIAN_FOLDER = r"C:\Users\YourName\Documents\Obsidian\Vault\Quotes"
 
-# Tag written into a file after it has been successfully sent to Readwise.
-SENT_TAG = "readwise"
-
-# Default title when a note's 'book title' field is blank.
-DEFAULT_TITLE = "CommonPlace Book"
-
-# Keychain service name used to store/retrieve the API token.
+SENT_TAG         = "readwise"       # tag added to a file after upload
+DEFAULT_TITLE    = "CommonPlace Book"
 KEYCHAIN_SERVICE = "readwise-gui"
 KEYCHAIN_USER    = "api-token"
-
 # ─────────────────────────────────────────────────────────────────────────────
 
 import os
 import re
+import urllib.parse
+import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import requests
@@ -46,11 +38,9 @@ API_URL = "https://readwise.io/api/v2/highlights/"
 # ── Token ─────────────────────────────────────────────────────────────────────
 
 def load_token():
-    # 1. Environment variable (overrides everything)
     t = os.environ.get("READWISE_TOKEN")
     if t:
         return t.strip()
-    # 2. OS keychain
     if _KEYRING_AVAILABLE:
         t = keyring.get_password(KEYCHAIN_SERVICE, KEYCHAIN_USER)
         if t:
@@ -62,7 +52,6 @@ def save_token(token):
     if _KEYRING_AVAILABLE:
         keyring.set_password(KEYCHAIN_SERVICE, KEYCHAIN_USER, token)
     else:
-        # Fallback: plain file (Windows path, no chmod)
         path = os.path.join(os.path.expanduser("~"), ".config", "readwise", "token")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
@@ -71,12 +60,12 @@ def save_token(token):
 
 # ── YAML frontmatter helpers ──────────────────────────────────────────────────
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
-_TAG_LINE_RE    = re.compile(r"^tags\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
+_FRONTMATTER_RE  = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+_TAG_LINE_RE     = re.compile(r"^tags\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
+_SUMMARY_LINE_RE = re.compile(r"^summary\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
 
 
 def parse_frontmatter(text):
-    """Return a dict of lowercase key → value from YAML frontmatter, or {}."""
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return {}
@@ -89,7 +78,6 @@ def parse_frontmatter(text):
 
 
 def get_tags(text):
-    """Return the tags list from frontmatter as lowercase strings."""
     fm = parse_frontmatter(text)
     raw = fm.get("tags", "")
     if not raw:
@@ -97,22 +85,34 @@ def get_tags(text):
     return [t.strip().strip('"').lower() for t in raw.split() if t.strip()]
 
 
-def add_sent_tag(filepath, text):
-    """Append SENT_TAG to the tags line in frontmatter and rewrite the file."""
-    def replacer(m):
-        existing = m.group(1).strip()
-        return f"tags: {existing} {SENT_TAG}" if existing else f"tags: {SENT_TAG}"
-
+def mark_sent(filepath, text, hl_id):
+    """Add SENT_TAG to tags and write the Readwise ID into the summary field."""
     fm_match = _FRONTMATTER_RE.match(text)
     if not fm_match:
         return
+    fm_body = fm_match.group(1)
 
-    if _TAG_LINE_RE.search(fm_match.group(1)):
-        new_fm = _TAG_LINE_RE.sub(replacer, fm_match.group(1))
+    # 1. Append to tags line (or add one)
+    def tag_replacer(m):
+        existing = m.group(1).strip()
+        return f"tags: {existing} {SENT_TAG}" if existing else f"tags: {SENT_TAG}"
+
+    if _TAG_LINE_RE.search(fm_body):
+        fm_body = _TAG_LINE_RE.sub(tag_replacer, fm_body)
     else:
-        new_fm = fm_match.group(1) + f"\ntags: {SENT_TAG}"
+        fm_body += f"\ntags: {SENT_TAG}"
 
-    new_text = text[:fm_match.start(1)] + new_fm + text[fm_match.end(1):]
+    # 2. Append Readwise ID to summary line (or add one)
+    def summary_replacer(m):
+        existing = m.group(1).strip()
+        return f"summary: {existing} | readwise:{hl_id}" if existing else f"summary: readwise:{hl_id}"
+
+    if _SUMMARY_LINE_RE.search(fm_body):
+        fm_body = _SUMMARY_LINE_RE.sub(summary_replacer, fm_body)
+    else:
+        fm_body += f"\nsummary: readwise:{hl_id}"
+
+    new_text = text[:fm_match.start(1)] + fm_body + text[fm_match.end(1):]
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(new_text)
 
@@ -140,14 +140,13 @@ def post_highlight(token, text, title=None, author=None, note=None, tags=None):
 
 def scan_folder(folder):
     """
-    Return a list of dicts for every .md file that:
-      - has a non-empty 'quote' field in its frontmatter
-      - does NOT already have SENT_TAG in its tags
-    Each dict: {path, filename, title, author, quote}
+    Return a list of dicts for every .md file in folder.
+    Each dict includes 'uploaded' (bool) based on whether SENT_TAG is present.
+    Only files with a non-empty 'quote' field are included.
     """
-    pending = []
+    files = []
     if not os.path.isdir(folder):
-        return pending
+        return files
     for fname in sorted(os.listdir(folder)):
         if not fname.endswith(".md"):
             continue
@@ -158,22 +157,29 @@ def scan_folder(folder):
         except Exception:
             continue
 
-        if SENT_TAG in get_tags(text):
-            continue
-
         fm = parse_frontmatter(text)
         quote = fm.get("quote", "").strip()
         if not quote:
             continue
 
-        pending.append({
+        uploaded = SENT_TAG in get_tags(text)
+        files.append({
             "path":     fpath,
             "filename": fname,
             "title":    fm.get("book title", "").strip() or DEFAULT_TITLE,
             "author":   fm.get("author", "").strip() or None,
             "quote":    quote,
+            "uploaded": uploaded,
         })
-    return pending
+    return files
+
+
+# ── Obsidian opener ───────────────────────────────────────────────────────────
+
+def open_in_obsidian(filepath):
+    """Open a file in Obsidian using the obsidian:// URI scheme."""
+    uri = "obsidian://open?path=" + urllib.parse.quote(filepath, safe=":/\\")
+    webbrowser.open(uri)
 
 
 # ── Settings dialog ───────────────────────────────────────────────────────────
@@ -192,12 +198,10 @@ class SettingsDialog(tk.Toplevel):
         f.grid(sticky="nsew")
         f.columnconfigure(1, weight=1)
 
-        # Folder
         ttk.Label(f, text="Obsidian folder").grid(row=0, column=0, sticky="w", padx=(0, p), pady=4)
         self._folder_var = tk.StringVar(value=folder)
-        ttk.Entry(f, textvariable=self._folder_var, width=48).grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Entry(f, textvariable=self._folder_var, width=48).grid(row=0, column=1, columnspan=2, sticky="ew", pady=4)
 
-        # Token
         ttk.Label(f, text="API token").grid(row=1, column=0, sticky="w", padx=(0, p), pady=4)
         self._token_var = tk.StringVar(value=load_token())
         token_entry = ttk.Entry(f, textvariable=self._token_var, show="•", width=48)
@@ -208,13 +212,12 @@ class SettingsDialog(tk.Toplevel):
                    ).grid(row=1, column=2, padx=(4, 0))
 
         storage = "Windows Credential Manager" if _KEYRING_AVAILABLE else "plain file (~/.config/readwise/token)"
-        ttk.Label(f, text=f"Token stored in: {storage}", foreground="grey").grid(
-            row=2, column=1, sticky="w")
+        ttk.Label(f, text=f"Token stored in: {storage}", foreground="grey").grid(row=2, column=1, sticky="w")
 
         link = tk.Label(f, text="Get token →", fg="blue", cursor="hand2",
                         font=("TkDefaultFont", 9, "underline"))
         link.grid(row=3, column=1, sticky="w", pady=(2, p))
-        link.bind("<Button-1>", lambda _: __import__("webbrowser").open("https://readwise.io/access_token"))
+        link.bind("<Button-1>", lambda _: webbrowser.open("https://readwise.io/access_token"))
 
         bf = ttk.Frame(f)
         bf.grid(row=4, column=0, columnspan=3, sticky="e")
@@ -223,6 +226,9 @@ class SettingsDialog(tk.Toplevel):
 
         self.bind("<Return>", lambda _: self._save())
         self.bind("<Escape>", lambda _: self.destroy())
+        self._center(parent)
+
+    def _center(self, parent):
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
@@ -239,36 +245,32 @@ class SettingsDialog(tk.Toplevel):
 # ── Confirmation dialog ───────────────────────────────────────────────────────
 
 class ConfirmDialog(tk.Toplevel):
-    """Shows pending quotes and lets the user deselect any before sending."""
-
     def __init__(self, parent, pending):
         super().__init__(parent)
         self.title("Confirm upload")
         self.resizable(True, True)
-        self.minsize(640, 400)
+        self.minsize(660, 380)
         self.transient(parent)
         self.grab_set()
-        self.result = None  # list of approved items, or None if cancelled
+        self.result = None
 
         p = 10
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        ttk.Label(self, text="Uncheck any notes you do NOT want to send, then click Send.",
+        ttk.Label(self, text="Click a row to toggle it. Only checked notes will be sent.",
                   padding=(p, p, p, 0)).grid(row=0, column=0, sticky="w")
 
         frame = ttk.Frame(self, padding=p)
         frame.grid(row=1, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
 
         cols = ("send", "file", "book title", "author", "quote")
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="none")
-        widths = {"send": 40, "file": 160, "book title": 140, "author": 110, "quote": 240}
-        for col in cols:
+        for col, width in zip(cols, (40, 160, 140, 110, 260)):
             self.tree.heading(col, text=col.capitalize())
-            self.tree.column(col,  width=widths[col], anchor="w")
+            self.tree.column(col, width=width, anchor="w")
         self.tree.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(frame, command=self.tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
@@ -278,9 +280,7 @@ class ConfirmDialog(tk.Toplevel):
         for item in pending:
             var = tk.BooleanVar(value=True)
             iid = self.tree.insert("", "end", values=(
-                "✓",
-                item["filename"],
-                item["title"],
+                "✓", item["filename"], item["title"],
                 item["author"] or "",
                 item["quote"][:60] + ("…" if len(item["quote"]) > 60 else ""),
             ))
@@ -294,6 +294,9 @@ class ConfirmDialog(tk.Toplevel):
 
         self.bind("<Return>", lambda _: self._confirm())
         self.bind("<Escape>", lambda _: self.destroy())
+        self._center(parent)
+
+    def _center(self, parent):
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width()  - self.winfo_width())  // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
@@ -305,9 +308,8 @@ class ConfirmDialog(tk.Toplevel):
             return
         var, item = self._checks[iid]
         var.set(not var.get())
-        tick = "✓" if var.get() else "✗"
         vals = list(self.tree.item(iid, "values"))
-        vals[0] = tick
+        vals[0] = "✓" if var.get() else "✗"
         self.tree.item(iid, values=vals)
 
     def _confirm(self):
@@ -317,6 +319,8 @@ class ConfirmDialog(tk.Toplevel):
 
 # ── Main window ───────────────────────────────────────────────────────────────
 
+FILTER_OPTIONS = ["All files", "Not yet uploaded", "Already uploaded"]
+
 class App(tk.Tk):
     PAD = 10
 
@@ -324,9 +328,9 @@ class App(tk.Tk):
         super().__init__()
         self.title("Readwise — Obsidian Sync")
         self.resizable(True, True)
-        self.minsize(560, 480)
-        self._folder = OBSIDIAN_FOLDER
-        self._pending = []
+        self.minsize(620, 520)
+        self._folder  = OBSIDIAN_FOLDER
+        self._all     = []   # full scan results
         self._build()
         self._scan()
 
@@ -334,7 +338,7 @@ class App(tk.Tk):
         p = self.PAD
         self.columnconfigure(0, weight=1)
 
-        # Folder + controls row
+        # Top bar
         top = ttk.Frame(self, padding=(p, p, p, 0))
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(1, weight=1)
@@ -343,42 +347,54 @@ class App(tk.Tk):
         self._folder_label = ttk.Label(top, text=self._folder, foreground="grey", anchor="w")
         self._folder_label.grid(row=0, column=1, sticky="ew")
         ttk.Button(top, text="⚙ Settings", command=self._open_settings).grid(row=0, column=2, padx=(6, 0))
-        ttk.Button(top, text="↺ Scan",     command=self._scan).grid(row=0, column=3, padx=(6, 0))
+        ttk.Button(top, text="↺ Scan",     command=self._scan).grid(row=0, column=3, padx=(4, 0))
 
-        # Pending files list
-        lf = ttk.LabelFrame(self, text="Pending notes", padding=p)
-        lf.grid(row=1, column=0, sticky="nsew", padx=p, pady=(p, 0))
+        # Filter row
+        frow = ttk.Frame(self, padding=(p, 4, p, 0))
+        frow.grid(row=1, column=0, sticky="ew")
+        ttk.Label(frow, text="Show:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self._filter_var = tk.StringVar(value=FILTER_OPTIONS[0])
+        cb = ttk.Combobox(frow, textvariable=self._filter_var,
+                          values=FILTER_OPTIONS, state="readonly", width=20)
+        cb.grid(row=0, column=1, sticky="w")
+        cb.bind("<<ComboboxSelected>>", lambda _: self._apply_filter())
+
+        # File list
+        lf = ttk.LabelFrame(self, text="Notes", padding=p)
+        lf.grid(row=2, column=0, sticky="nsew", padx=p, pady=(p, 0))
         lf.columnconfigure(0, weight=1)
         lf.rowconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
 
-        cols = ("file", "book title", "author", "quote")
+        cols = ("status", "file", "book title", "author", "quote")
         self.tree = ttk.Treeview(lf, columns=cols, show="headings", selectmode="extended")
-        widths = {"file": 160, "book title": 140, "author": 110, "quote": 260}
-        for col in cols:
+        for col, width in zip(cols, (60, 160, 140, 110, 260)):
             self.tree.heading(col, text=col.capitalize())
-            self.tree.column(col,  width=widths[col], anchor="w")
+            self.tree.column(col, width=width, anchor="w")
+        self.tree.tag_configure("uploaded", background="#cce5ff")  # light blue
         self.tree.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(lf, command=self.tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=sb.set)
+        self.tree.bind("<Double-1>", self._open_selected)
 
         # Log
         logf = ttk.LabelFrame(self, text="Log", padding=p)
-        logf.grid(row=2, column=0, sticky="ew", padx=p, pady=(p, 0))
+        logf.grid(row=3, column=0, sticky="ew", padx=p, pady=(p, 0))
         logf.columnconfigure(0, weight=1)
-        self.log = scrolledtext.ScrolledText(logf, height=5, state="disabled", wrap="word")
+        self.log = scrolledtext.ScrolledText(logf, height=4, state="disabled", wrap="word")
         self.log.grid(row=0, column=0, sticky="ew")
 
         # Bottom buttons
         bf = ttk.Frame(self, padding=(p, p // 2, p, p))
-        bf.grid(row=3, column=0, sticky="ew")
+        bf.grid(row=4, column=0, sticky="ew")
         bf.columnconfigure(0, weight=1)
 
         self.status_var = tk.StringVar()
         ttk.Label(bf, textvariable=self.status_var, foreground="grey").grid(row=0, column=0, sticky="w")
-        ttk.Button(bf, text="Send all →",    command=self._send_all).grid(row=0, column=1)
-        ttk.Button(bf, text="Send selected", command=self._send_selected).grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(bf, text="Open in Obsidian", command=self._open_selected).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(bf, text="Send all →",        command=self._send_all).grid(row=0, column=2)
+        ttk.Button(bf, text="Send selected",     command=self._send_selected).grid(row=0, column=3, padx=(6, 0))
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -389,18 +405,35 @@ class App(tk.Tk):
         self.log.configure(state="disabled")
 
     def _scan(self):
-        self._pending = scan_folder(self._folder)
+        self._all = scan_folder(self._folder)
+        self._apply_filter()
+        total    = len(self._all)
+        pending  = sum(1 for f in self._all if not f["uploaded"])
+        uploaded = total - pending
+        self.status_var.set(f"{total} notes — {pending} pending, {uploaded} uploaded.")
+        self._log(f"Scanned '{self._folder}': {pending} pending, {uploaded} uploaded.")
+
+    def _apply_filter(self):
+        filt = self._filter_var.get()
+        if filt == "Already uploaded":
+            shown = [f for f in self._all if f["uploaded"]]
+        elif filt == "Not yet uploaded":
+            shown = [f for f in self._all if not f["uploaded"]]
+        else:
+            shown = self._all
+
         self.tree.delete(*self.tree.get_children())
-        for item in self._pending:
-            self.tree.insert("", "end", values=(
+        for item in shown:
+            tag    = "uploaded" if item["uploaded"] else ""
+            status = "✓ sent" if item["uploaded"] else "pending"
+            self.tree.insert("", "end", tags=(tag,), values=(
+                status,
                 item["filename"],
                 item["title"],
                 item["author"] or "",
                 item["quote"][:80] + ("…" if len(item["quote"]) > 80 else ""),
             ))
-        n = len(self._pending)
-        self.status_var.set(f"{n} note(s) pending.")
-        self._log(f"Scanned '{self._folder}': {n} pending.")
+        self._shown = shown
 
     def _open_settings(self):
         def on_save(new_folder):
@@ -409,6 +442,19 @@ class App(tk.Tk):
             self.status_var.set("Settings saved.")
             self._scan()
         SettingsDialog(self, self._folder, on_save)
+
+    def _open_selected(self, _event=None):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("No selection", "Select a note first.")
+            return
+        for iid in selection:
+            idx  = self.tree.index(iid)
+            item = self._shown[idx]
+            open_in_obsidian(item["path"])
+
+    def _pending_items(self):
+        return [f for f in self._all if not f["uploaded"]]
 
     def _confirm_and_send(self, items):
         if not items:
@@ -423,7 +469,7 @@ class App(tk.Tk):
         dlg = ConfirmDialog(self, items)
         self.wait_window(dlg)
         approved = dlg.result
-        if approved is None or not approved:
+        if not approved:
             self._log("Upload cancelled.")
             return
 
@@ -432,9 +478,9 @@ class App(tk.Tk):
             try:
                 result = post_highlight(token, item["quote"], item["title"], item["author"])
                 hl_id  = result[0].get("id", "?") if result else "?"
-                with open(item["path"], encoding="utf-8") as f:
-                    text = f.read()
-                add_sent_tag(item["path"], text)
+                with open(item["path"], encoding="utf-8") as fh:
+                    text = fh.read()
+                mark_sent(item["path"], text, hl_id)
                 self._log(f"✓ Sent '{item['title']}' — {item['filename']} (id {hl_id})")
                 sent += 1
             except requests.HTTPError as e:
@@ -446,11 +492,15 @@ class App(tk.Tk):
         self._scan()
 
     def _send_all(self):
-        self._confirm_and_send(self._pending)
+        self._confirm_and_send(self._pending_items())
 
     def _send_selected(self):
-        indices = [self.tree.index(iid) for iid in self.tree.selection()]
-        self._confirm_and_send([self._pending[i] for i in indices])
+        indices  = [self.tree.index(iid) for iid in self.tree.selection()]
+        selected = [self._shown[i] for i in indices]
+        pending  = [f for f in selected if not f["uploaded"]]
+        if len(pending) < len(selected):
+            self._log(f"Skipping {len(selected) - len(pending)} already-uploaded note(s).")
+        self._confirm_and_send(pending)
 
 
 if __name__ == "__main__":
