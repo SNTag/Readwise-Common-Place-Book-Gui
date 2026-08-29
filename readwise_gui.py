@@ -10,14 +10,18 @@ Requires: pip install requests keyring
 LAST_MODIFIED = "2026-08-29"
 
 # ── User configuration ────────────────────────────────────────────────────────
+# OBSIDIAN_FOLDER is the default used on first run only.
+# After that the saved setting in ~/.config/readwise/settings.json takes over.
 OBSIDIAN_FOLDER = r"C:\Users\YourName\Documents\Obsidian\Vault\Quotes"
 
 SENT_TAG         = "readwise"       # tag added to a file after upload
 DEFAULT_TITLE    = "CommonPlace Book"
 KEYCHAIN_SERVICE = "readwise-gui"
 KEYCHAIN_USER    = "api-token"
+SETTINGS_FILE    = os.path.join(os.path.expanduser("~"), ".config", "readwise", "settings.json")
 # ─────────────────────────────────────────────────────────────────────────────
 
+import json
 import os
 import re
 import urllib.parse
@@ -58,6 +62,23 @@ def save_token(token):
             f.write(token)
 
 
+# ── Settings persistence ──────────────────────────────────────────────────────
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"folder": OBSIDIAN_FOLDER}
+
+def save_settings(data):
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
 # ── YAML frontmatter helpers ──────────────────────────────────────────────────
 
 _FRONTMATTER_RE  = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
@@ -78,11 +99,19 @@ def parse_frontmatter(text):
 
 
 def get_tags(text):
+    """Return all tags from frontmatter as lowercase strings."""
     fm = parse_frontmatter(text)
     raw = fm.get("tags", "")
     if not raw:
         return []
     return [t.strip().strip('"').lower() for t in raw.split() if t.strip()]
+
+def is_sent(text):
+    return SENT_TAG in get_tags(text)
+
+def tags_for_readwise(text):
+    """Return tags suitable for sending to Readwise (exclude the sent tag)."""
+    return [t for t in get_tags(text) if t != SENT_TAG]
 
 
 def mark_sent(filepath, text, hl_id):
@@ -162,13 +191,14 @@ def scan_folder(folder):
         if not quote:
             continue
 
-        uploaded = SENT_TAG in get_tags(text)
+        uploaded = is_sent(text)
         files.append({
             "path":     fpath,
             "filename": fname,
             "title":    fm.get("book title", "").strip() or DEFAULT_TITLE,
             "author":   fm.get("author", "").strip() or None,
             "quote":    quote,
+            "tags":     tags_for_readwise(text),
             "uploaded": uploaded,
         })
     return files
@@ -329,7 +359,7 @@ class App(tk.Tk):
         self.title("Readwise — Obsidian Sync")
         self.resizable(True, True)
         self.minsize(620, 520)
-        self._folder  = OBSIDIAN_FOLDER
+        self._folder  = load_settings().get("folder", OBSIDIAN_FOLDER)
         self._all     = []   # full scan results
         self._build()
         self._scan()
@@ -439,6 +469,7 @@ class App(tk.Tk):
         def on_save(new_folder):
             self._folder = new_folder
             self._folder_label.configure(text=new_folder)
+            save_settings({"folder": new_folder})
             self.status_var.set("Settings saved.")
             self._scan()
         SettingsDialog(self, self._folder, on_save)
@@ -476,7 +507,7 @@ class App(tk.Tk):
         sent = 0
         for item in approved:
             try:
-                result = post_highlight(token, item["quote"], item["title"], item["author"])
+                result = post_highlight(token, item["quote"], item["title"], item["author"], tags=item.get("tags"))
                 hl_id  = result[0].get("id", "?") if result else "?"
                 with open(item["path"], encoding="utf-8") as fh:
                     text = fh.read()
