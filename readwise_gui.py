@@ -17,11 +17,12 @@ OBSIDIAN_FOLDER = r"C:\Users\YourName\Documents\Obsidian\Vault\Quotes"
 DEFAULT_TITLE    = "CommonPlace Book"
 KEYCHAIN_SERVICE = "readwise-gui"
 KEYCHAIN_USER    = "api-token"
-SETTINGS_FILE    = os.path.join(os.path.expanduser("~"), ".config", "readwise", "settings.json")
 # ─────────────────────────────────────────────────────────────────────────────
 
 import json
 import os
+
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".config", "readwise", "settings.json")
 import re
 import urllib.parse
 import webbrowser
