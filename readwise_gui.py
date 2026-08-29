@@ -84,7 +84,7 @@ def save_settings(data):
 _FRONTMATTER_RE  = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
 _SUMMARY_LINE_RE = re.compile(r"^summary\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
 
-READWISE_HL_URL = "https://readwise.io/highlights/{id}"
+READWISE_HL_URL = "https://readwise.io/bookreview/{id}"
 
 
 def parse_frontmatter(text):
@@ -113,7 +113,7 @@ def mark_sent(filepath, text, hl_id):
     fm_body = fm_match.group(1)
 
     link  = READWISE_HL_URL.format(id=hl_id)
-    entry = f"readwise:{hl_id} {link}"
+    entry = f"[readwise:{hl_id}]({link})"
 
     def summary_replacer(m):
         existing = m.group(1).strip().strip('"')
