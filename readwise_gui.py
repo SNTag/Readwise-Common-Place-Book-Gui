@@ -14,7 +14,6 @@ LAST_MODIFIED = "2026-08-29"
 # After that the saved setting in ~/.config/readwise/settings.json takes over.
 OBSIDIAN_FOLDER = r"C:\Users\YourName\Documents\Obsidian\Vault\Quotes"
 
-SENT_TAG         = "readwise"       # tag added to a file after upload
 DEFAULT_TITLE    = "CommonPlace Book"
 KEYCHAIN_SERVICE = "readwise-gui"
 KEYCHAIN_USER    = "api-token"
@@ -82,8 +81,9 @@ def save_settings(data):
 # ── YAML frontmatter helpers ──────────────────────────────────────────────────
 
 _FRONTMATTER_RE  = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
-_TAG_LINE_RE     = re.compile(r"^tags\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
 _SUMMARY_LINE_RE = re.compile(r"^summary\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
+
+READWISE_HL_URL = "https://readwise.io/highlights/{id}"
 
 
 def parse_frontmatter(text):
@@ -98,48 +98,31 @@ def parse_frontmatter(text):
     return result
 
 
-def get_tags(text):
-    """Return all tags from frontmatter as lowercase strings."""
-    fm = parse_frontmatter(text)
-    raw = fm.get("tags", "")
-    if not raw:
-        return []
-    return [t.strip().strip('"').lower() for t in raw.split() if t.strip()]
-
 def is_sent(text):
-    return SENT_TAG in get_tags(text)
-
-def tags_for_readwise(text):
-    """Return tags suitable for sending to Readwise (exclude the sent tag)."""
-    return [t for t in get_tags(text) if t != SENT_TAG]
+    """A file is considered sent if its summary field contains 'readwise:'."""
+    fm = parse_frontmatter(text)
+    return "readwise:" in fm.get("summary", "")
 
 
 def mark_sent(filepath, text, hl_id):
-    """Add SENT_TAG to tags and write the Readwise ID into the summary field."""
+    """Write the Readwise ID and link into the summary frontmatter field."""
     fm_match = _FRONTMATTER_RE.match(text)
     if not fm_match:
         return
     fm_body = fm_match.group(1)
 
-    # 1. Append to tags line (or add one)
-    def tag_replacer(m):
-        existing = m.group(1).strip()
-        return f"tags: {existing} {SENT_TAG}" if existing else f"tags: {SENT_TAG}"
+    link  = READWISE_HL_URL.format(id=hl_id)
+    entry = f"readwise:{hl_id} {link}"
 
-    if _TAG_LINE_RE.search(fm_body):
-        fm_body = _TAG_LINE_RE.sub(tag_replacer, fm_body)
-    else:
-        fm_body += f"\ntags: {SENT_TAG}"
-
-    # 2. Append Readwise ID to summary line (or add one)
     def summary_replacer(m):
-        existing = m.group(1).strip()
-        return f"summary: {existing} | readwise:{hl_id}" if existing else f"summary: readwise:{hl_id}"
+        existing = m.group(1).strip().strip('"')
+        merged   = f"{existing} | {entry}" if existing else entry
+        return f'summary: "{merged}"'
 
     if _SUMMARY_LINE_RE.search(fm_body):
         fm_body = _SUMMARY_LINE_RE.sub(summary_replacer, fm_body)
     else:
-        fm_body += f"\nsummary: readwise:{hl_id}"
+        fm_body += f'\nsummary: "{entry}"'
 
     new_text = text[:fm_match.start(1)] + fm_body + text[fm_match.end(1):]
     with open(filepath, "w", encoding="utf-8") as f:
@@ -198,7 +181,6 @@ def scan_folder(folder):
             "title":    fm.get("book title", "").strip() or DEFAULT_TITLE,
             "author":   fm.get("author", "").strip() or None,
             "quote":    quote,
-            "tags":     tags_for_readwise(text),
             "uploaded": uploaded,
         })
     return files
@@ -507,7 +489,7 @@ class App(tk.Tk):
         sent = 0
         for item in approved:
             try:
-                result = post_highlight(token, item["quote"], item["title"], item["author"], tags=item.get("tags"))
+                result = post_highlight(token, item["quote"], item["title"], item["author"])
                 hl_id  = result[0].get("id", "?") if result else "?"
                 with open(item["path"], encoding="utf-8") as fh:
                     text = fh.read()
