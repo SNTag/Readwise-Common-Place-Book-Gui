@@ -87,6 +87,17 @@ _SUMMARY_LINE_RE = re.compile(r"^summary\s*:\s*(.*)", re.IGNORECASE | re.MULTILI
 READWISE_HL_URL = "https://readwise.io/bookreview/{id}"
 
 
+def _strip_wikilink(val):
+    """Extract display text from Obsidian wiki-links.
+    '[[path|Title]]' → 'Title', '[[Title]]' → 'Title', plain text unchanged.
+    """
+    val = val.strip().strip('"').strip("'")
+    m = re.match(r"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]", val)
+    if m:
+        return m.group(1).strip()
+    return val
+
+
 def parse_frontmatter(text):
     m = _FRONTMATTER_RE.match(text)
     if not m:
@@ -116,15 +127,13 @@ def parse_frontmatter(text):
                 i += 1
                 while i < len(lines) and lines[i].strip().startswith("-"):
                     item = lines[i].strip().lstrip("- ").strip()
-                    item = item.strip('"').strip("'")   # remove surrounding quotes
-                    item = re.sub(r"^\[\[|\]\]$", "", item)  # remove [[ ]] wiki-link
-                    list_items.append(item)
+                    item = item.strip('"').strip("'")
+                    list_items.append(_strip_wikilink(item))
                     i += 1
                 result[key] = ", ".join(list_items) if list_items else ""
                 continue
             else:
-                val = re.sub(r"\[\[|\]\]", "", val)  # strip wiki-link brackets
-                result[key] = val
+                result[key] = _strip_wikilink(val)
         i += 1
     return result
 
