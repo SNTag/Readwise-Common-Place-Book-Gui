@@ -115,11 +115,15 @@ def parse_frontmatter(text):
                 list_items = []
                 i += 1
                 while i < len(lines) and lines[i].strip().startswith("-"):
-                    list_items.append(lines[i].strip().lstrip("- ").strip())
+                    item = lines[i].strip().lstrip("- ").strip()
+                    item = item.strip('"').strip("'")   # remove surrounding quotes
+                    item = re.sub(r"^\[\[|\]\]$", "", item)  # remove [[ ]] wiki-link
+                    list_items.append(item)
                     i += 1
                 result[key] = ", ".join(list_items) if list_items else ""
                 continue
             else:
+                val = re.sub(r"\[\[|\]\]", "", val)  # strip wiki-link brackets
                 result[key] = val
         i += 1
     return result
