@@ -107,11 +107,17 @@ def parse_frontmatter(text):
                 while i < len(lines) and (lines[i].startswith(" ") or lines[i] == ""):
                     block_lines.append(lines[i])
                     i += 1
-                # Dedent by the common leading spaces
-                dedented = []
-                for bl in block_lines:
-                    dedented.append(bl.lstrip(" ") if bl.strip() else "")
+                dedented = [bl.lstrip(" ") if bl.strip() else "" for bl in block_lines]
                 result[key] = "\n".join(dedented).strip()
+                continue
+            elif val == "":
+                # Possibly a list value — collect "- item" lines that follow
+                list_items = []
+                i += 1
+                while i < len(lines) and lines[i].strip().startswith("-"):
+                    list_items.append(lines[i].strip().lstrip("- ").strip())
+                    i += 1
+                result[key] = ", ".join(list_items) if list_items else ""
                 continue
             else:
                 result[key] = val
