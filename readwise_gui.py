@@ -504,6 +504,25 @@ class App(tk.Tk):
         self.status_var.set(f"Done: {sent}/{len(approved)} sent.")
         self._scan()
 
+    def _ask_resubmit(self, already_uploaded):
+        """
+        Show a per-file prompt for each already-uploaded item.
+        Returns the subset the user approves for re-sending.
+        """
+        approved = []
+        for item in already_uploaded:
+            answer = messagebox.askyesno(
+                "Already uploaded",
+                f"'{item['filename']}' has already been sent to Readwise.\n\n"
+                f"Re-send it?",
+                icon="question",
+            )
+            if answer:
+                approved.append(item)
+            else:
+                self._log(f"Skipped (already uploaded): {item['filename']}")
+        return approved
+
     def _send_all(self):
         self._confirm_and_send(self._pending_items())
 
@@ -511,8 +530,9 @@ class App(tk.Tk):
         indices  = [self.tree.index(iid) for iid in self.tree.selection()]
         selected = [self._shown[i] for i in indices]
         pending  = [f for f in selected if not f["uploaded"]]
-        if len(pending) < len(selected):
-            self._log(f"Skipping {len(selected) - len(pending)} already-uploaded note(s).")
+        already  = [f for f in selected if f["uploaded"]]
+        if already:
+            pending += self._ask_resubmit(already)
         self._confirm_and_send(pending)
 
 
