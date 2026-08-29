@@ -82,7 +82,7 @@ def save_settings(data):
 # ── YAML frontmatter helpers ──────────────────────────────────────────────────
 
 _FRONTMATTER_RE  = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
-_SOURCE_LINE_RE = re.compile(r"^source\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
+_SUMMARY_LINE_RE = re.compile(r"^summary\s*:\s*(.*)", re.IGNORECASE | re.MULTILINE)
 
 READWISE_HL_URL = "https://readwise.io/bookreview/{id}"
 
@@ -100,9 +100,9 @@ def parse_frontmatter(text):
 
 
 def is_sent(text):
-    """A file is considered sent if its source field contains 'readwise:'."""
+    """A file is considered sent if its summary field contains 'readwise:'."""
     fm = parse_frontmatter(text)
-    return "readwise:" in fm.get("source", "")
+    return "readwise:" in fm.get("summary", "")
 
 
 def mark_sent(filepath, text, hl_id):
@@ -115,15 +115,15 @@ def mark_sent(filepath, text, hl_id):
     link  = READWISE_HL_URL.format(id=hl_id)
     entry = f"[readwise:{hl_id}]({link})"
 
-    def source_replacer(m):
+    def summary_replacer(m):
         existing = m.group(1).strip().strip('"')
         merged   = f"{existing} | {entry}" if existing else entry
-        return f'source: "{merged}"'
+        return f'summary: "{merged}"'
 
-    if _SOURCE_LINE_RE.search(fm_body):
-        fm_body = _SOURCE_LINE_RE.sub(source_replacer, fm_body)
+    if _SUMMARY_LINE_RE.search(fm_body):
+        fm_body = _SUMMARY_LINE_RE.sub(summary_replacer, fm_body)
     else:
-        fm_body += f'\nsource: "{entry}"'
+        fm_body += f'\nsummary: "{entry}"'
 
     new_text = text[:fm_match.start(1)] + fm_body + text[fm_match.end(1):]
     with open(filepath, "w", encoding="utf-8") as f:
